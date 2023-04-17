@@ -36,9 +36,10 @@ def diffusion_generation(load_from_file = False, verbose = True, reg_wdecay_beta
     t = time.time()
     (train_images, train_labels),(test_images, test_labels) = load_smallnorb()
     train_images = train_images.astype(np.float64) / 255.0
-    train_images = train_images[:,:,:,0]
-    #train_images2 = train_images[:,:,:,1]
-    #train_images = np.concatenate((train_images1,train_images2), axis=0)
+    train_images1 = train_images[:,:,:,0]
+    train_images2 = train_images[:,:,:,1]
+    train_images = np.concatenate((train_images1,train_images2), axis=0)
+    train_images = train_images[:16]
     print(train_images.shape)
     print("diffusing images...")
     diffused_images = apply_diffusion(train_images, timesteps=5, noise_std=0.1)
@@ -61,11 +62,12 @@ def diffusion_generation(load_from_file = False, verbose = True, reg_wdecay_beta
         axs[i, 0].imshow(train_images[i], cmap='gray')
         # Display diffused image
         axs[i, 1].imshow(diffused_images[i], cmap='gray')
+    plt.show()
 
     print(diffused_images.shape)
     print(diffused_images[0].shape)
 
-    plt.show()
+    
 
     # Create 'saved' folder if it doesn't exist
     if not os.path.isdir("saved"):
@@ -86,14 +88,17 @@ def diffusion_generation(load_from_file = False, verbose = True, reg_wdecay_beta
         # Load the model from file
         if verbose:
             print("Loading neural network from %s..." % net_save_name)
-        net = tf.keras.models.load_model(net_save_name)
+        generation_model = tf.keras.models.load_model(net_save_name)
 
         # Load the training history - since it should have been created right after
         # saving the model
+        print("finding history")
         if os.path.isfile(history_save_name):
+            print("history found")
             with gzip.open(history_save_name) as f:
                 history = pickle.load(f)
         else:
+            print("history not found")
             history = []
     else:
       # ************************************************
@@ -102,15 +107,20 @@ def diffusion_generation(load_from_file = False, verbose = True, reg_wdecay_beta
         t1 = time.time()
         # Create feed-forward network
         inputs = tf.keras.layers.Input(shape=(96,96,1))
-        outputs = tf.keras.layers.Dense(96*96, activation='linear')(inputs)
-        #outputs = tf.keras.layers.Reshape((96, 96, 1))(outputs)
+        downconv1 = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), strides = (1,1), activation='relu', padding='same')(inputs)
+        downconv12nd = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), strides = (1,1), activation='relu', padding='same')(downconv1)
+        downconv1pool = tf.keras.layers.MaxPool2D(pool_size=(2, 2), strides=(2, 2))(downconv12nd)
+        outputs1 = tf.keras.layers.Conv2D(filters=1, kernel_size=(3, 3), padding='same', activation=None) (downconv1pool)
+        outputs = tf.keras.layers.Conv2DTranspose(filters=1, kernel_size=(3, 3), strides=(2, 2), padding='same', activation=None)(outputs1)
+        
 
         generation_model = tf.keras.Model(inputs=inputs, outputs=outputs)
+        print(generation_model.input)
         
         
         # Define training regime: type of optimiser, loss function to optimise and type of error measure to report during
         # training
-        generation_model.compile(optimizer='adam',
+        generation_model.compile(optimizer='sgd',
                         loss='mean_squared_error',
                         metrics=['mean_squared_error'])
         
@@ -125,45 +135,54 @@ def diffusion_generation(load_from_file = False, verbose = True, reg_wdecay_beta
             mode='min',
             save_best_only=True)
         
-        print()
-        train_info = generation_model.fit(train_images, train_images, validation_split=0.0,  epochs=2, shuffle=True, callbacks=[model_checkpoint_callback], batch_size=16)
-        
+        train_info = generation_model.fit(train_images, train_images, validation_split=0.1,  epochs=2, shuffle=True, callbacks=[model_checkpoint_callback], batch_size=16)
+        print("trained in ", (time.time()-t1) /60, " minutes")
     # *********************************************************
     # * Evaluating the neural network model within tensorflow *
     # *********************************************************
 
 
+        if verbose:
+            print("------------PREDICTING----------------")
+            loss_train, mse_train = generation_model.evaluate(train_images, train_images, verbose=0)
+            #loss_test, mse_test = generation.evaluate(test_images, test_elevations, verbose=0)
+
+            print("Train mse: %.2f" % mse_train)
+            #print("Test mse: %.2f" % mse_test)
+
+            # Load the weights of the best model
+            print("Loading best save weight from %s..." % checkpoint_save_name)
+            generation_model.load_weights(checkpoint_save_name)
+
+            # Save the entire model to file
+            print("Saving neural network to %s..." % net_save_name)
+            generation_model.save(net_save_name)
+
+            # Save training history to file
+            history = train_info.history
+            with gzip.open(history_save_name, 'w') as f:
+                pickle.dump(history, f)
+
     if verbose:
         print("------------PREDICTING----------------")
-        loss_train, mse_train = generation_model.evaluate(train_images, train_images, verbose=0)
+        loss_train, mse_train = generation_model.evaluate(diffused_images, train_images, verbose=0)
         #loss_test, mse_test = generation.evaluate(test_images, test_elevations, verbose=0)
 
         print("Train mse: %.2f" % mse_train)
         #print("Test mse: %.2f" % mse_test)
+        generative_images = generation_model.predict(diffused_images)
+        print(generative_images.shape)
 
-        # Compute output for 16 test images
-        #y_test16 = net.predict(test_images[:16])
-        #print(y_test16)
-        #y_test16 = np.argmax(y_test16, axis=1)
-        #y_train16 = net.predict(train_images[:16])
-        #print(y_train16)
-        #y_train16 = np.argmax(y_train16, axis=1)
-        #y_test = net.predict(test_images)
-        #y_test = np.argmax(y_test, axis=1)
-        print("trained in ", (time.time()-t1) /60, " minutes")
+        fig, axs = plt.subplots(8, 2, figsize=(10, 20))
+        axs[0, 0].set_title('Original Image')
+        axs[0, 1].set_title('Diffused Image')
 
-        # Load the weights of the best model
-        print("Loading best save weight from %s..." % checkpoint_save_name)
-        net.load_weights(checkpoint_save_name)
-
-        # Save the entire model to file
-        print("Saving neural network to %s..." % net_save_name)
-        net.save(net_save_name)
-
-        # Save training history to file
-        history = train_info.history
-        with gzip.open(history_save_name, 'w') as f:
-            pickle.dump(history, f)
+        for i in range(8):
+            # Display original image
+            axs[i, 0].imshow(train_images[i], cmap='gray')
+            # Display diffused image
+            axs[i, 1].imshow(diffused_images[i], cmap='gray')
+        plt.show()
 
     # *********************************************************
     # * Training history *
@@ -181,7 +200,7 @@ def diffusion_generation(load_from_file = False, verbose = True, reg_wdecay_beta
         ph.legend(loc='lower right')
         
 
-    return net
+    return generation_model
 
     
 if __name__ == "__main__":
